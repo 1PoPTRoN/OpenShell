@@ -170,6 +170,29 @@ Project requirements:
 - Python 3.11+
 - Docker (running)
 
+### Nix setup
+
+The `nix develop` shell and `nix run .#…` apps, such as tmachine and the test
+guests, need Nix with flakes. We recommend
+[Determinate Nix](https://docs.determinate.systems/), which CI also uses and
+which enables flakes by default. With another installer,
+[enable flakes](https://wiki.nixos.org/wiki/Flakes#Enabling_flakes_permanently)
+yourself.
+
+To download prebuilt dependencies instead of building them from source, add
+the OpenShell binary cache to your Nix configuration. With Determinate Nix, add
+these lines to
+[`/etc/nix/nix.custom.conf`](https://docs.determinate.systems/determinate-nix#configuration)
+and restart the Nix daemon:
+
+```text
+extra-substituters = https://openshell.cachix.org
+extra-trusted-public-keys = openshell.cachix.org-1:OAr5MunsfH5PZvUsfD08OtGx5RtcwdNZGJdU5FqLm5w=
+```
+
+With other installers, follow the setup instructions for the
+[`openshell` Cachix cache](https://app.cachix.org/cache/openshell).
+
 ### Z3 installation
 
 The `openshell-prover` crate and standalone `openshell-prover-cli` binary link
