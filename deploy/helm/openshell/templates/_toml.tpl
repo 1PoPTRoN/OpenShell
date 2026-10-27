@@ -110,6 +110,11 @@ Top-level lists represent TOML arrays of tables and preserve their YAML order. *
 {{- range $legacyKey, $runtimeKey := dict "logLevel" "log_level" "enableLoopbackServiceHttp" "enable_loopback_service_http" "enableWebsocketTunnel" "enable_websocket_tunnel" "policyValidationFailureMode" "policy_validation_failure_mode" -}}
 {{- if not (hasKey $gateway $runtimeKey) -}}{{- $_ := set $gateway $runtimeKey (get $legacyServer $legacyKey) -}}{{- end -}}
 {{- end -}}
+{{/* An empty hostname format means "unset"; only translate it when set. The
+     discriminator is the gateway installation name, rendered above. */}}
+{{- if and (get $legacyServer "serviceHostnameFormat") (not (hasKey $gateway "service_hostname_format")) -}}
+{{- $_ := set $gateway "service_hostname_format" (get $legacyServer "serviceHostnameFormat") -}}
+{{- end -}}
 {{- if not (hasKey $gateway "compute_driver") -}}{{- $_ := set $gateway "compute_driver" "kubernetes" -}}{{- end -}}
 {{- $serverDnsNames := .Values.pkiInitJob.serverDnsNames | default list -}}
 {{- if .Values.certManager.enabled -}}{{- $serverDnsNames = .Values.certManager.serverDnsNames | default list -}}{{- end -}}

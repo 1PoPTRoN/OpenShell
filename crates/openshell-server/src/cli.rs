@@ -6,7 +6,10 @@
 use clap::parser::ValueSource;
 use clap::{ArgAction, ArgMatches, Command, CommandFactory, FromArgMatches, Parser};
 use miette::{IntoDiagnostic, Result};
-use openshell_core::config::{ConfigDeliveryMode, DEFAULT_GATEWAY_NAME, DEFAULT_SERVER_PORT};
+use openshell_core::config::{
+    ConfigDeliveryMode, DEFAULT_GATEWAY_NAME, DEFAULT_SERVER_PORT, ServiceHostnameFormat,
+    ServiceRoutingConfig,
+};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::net::{IpAddr, SocketAddr};
@@ -285,6 +288,13 @@ struct RunArgs {
         value_delimiter = ','
     )]
     server_sans: Vec<String>,
+
+    /// Hostname format for exposed sandbox services: `readable` (default)
+    /// keeps `<workspace>--<sandbox>[--<service>]` hostnames; `hashed` mints
+    /// opaque one-label hostnames discriminated by the gateway installation
+    /// name.
+    #[arg(long, env = "OPENSHELL_SERVICE_HOSTNAME_FORMAT")]
+    service_hostname_format: Option<ServiceHostnameFormat>,
 
     /// Enable plaintext HTTP routing for loopback sandbox service URLs.
     #[arg(
@@ -568,8 +578,13 @@ fn prepare_server_config_with_drivers(
                 .unwrap_or_default(),
         )
         .with_server_sans(args.server_sans.clone())
+        .with_service_hostname_format(args.service_hostname_format.unwrap_or_default())
         .with_loopback_service_http(args.enable_loopback_service_http)
         .with_websocket_tunnel(args.enable_websocket_tunnel);
+    config
+        .service_routing
+        .validate(&config.name)
+        .map_err(|error| miette::miette!("invalid service routing configuration: {error}"))?;
     if let Some(sources) = file
         .as_ref()
         .and_then(|file| file.openshell.gateway.provider_profile_sources.clone())
@@ -1054,6 +1069,11 @@ fn validate_preflight_semantics(
         args.grpc_rate_limit_requests,
         args.grpc_rate_limit_window_seconds,
     )?;
+    if args.service_hostname_format == Some(ServiceHostnameFormat::Hashed) {
+        ServiceRoutingConfig::default()
+            .validate(args.name.trim())
+            .map_err(|error| miette::miette!("invalid service routing configuration: {error}"))?;
+    }
     GuestTlsPaths::validate_configuration(Some(gateway), args.disable_tls)
         .map_err(|error| miette::miette!("invalid gateway guest TLS configuration: {error}"))?;
 
@@ -1262,6 +1282,12 @@ fn merge_file_into_args(args: &mut RunArgs, file: &GatewayFileSection, matches: 
     {
         args.server_sans.clone_from(sans);
     }
+    if let Some(format) = &file.service_hostname_format
+        && args.service_hostname_format.is_none()
+        && arg_defaulted(matches, "service_hostname_format")
+    {
+        args.service_hostname_format = Some(*format);
+    }
     if let Some(enabled) = file.enable_loopback_service_http
         && arg_defaulted(matches, "enable_loopback_service_http")
     {
@@ -1427,6 +1453,7 @@ mod tests {
     use super::{Cli, command};
     use crate::test_environment::Environment;
     use clap::Parser;
+    use openshell_core::config::ServiceHostnameFormat;
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2602,6 +2629,10 @@ mod tests {
                 "[openshell]\nversion = 2\n[openshell.gateway]\nname = 'secret-semantic-marker'\ngrpc_rate_limit_requests = 10\n",
             ),
             (
+                "service-routing",
+                "[openshell]\nversion = 2\n[openshell.gateway]\nservice_routing_gateway_name = 'Not A Label'\n",
+            ),
+            (
                 "guest-tls",
                 "[openshell]\nversion = 2\n[openshell.gateway]\nguest_tls_ca = '/tls/ca.pem'\ndisable_tls = true\n",
             ),
@@ -3745,6 +3776,126 @@ enable_loopback_service_http = false
                 assert!(
                     args.enable_loopback_service_http,
                     "env var must win over file"
+                );
+            });
+    }
+
+    #[test]
+    fn file_populates_service_hostname_format() {
+        Environment::new()
+            .remove("OPENSHELL_SERVICE_HOSTNAME_FORMAT")
+            .run(|| {
+                let (mut args, matches) =
+                    parse_with_args(&["openshell-gateway", "--db-url", "sqlite::memory:"]);
+                let file = config_file_from_toml(
+                    "[openshell.gateway]\nservice_hostname_format = \"hashed\"\n",
+                );
+                merge_file_into_args(&mut args, &file.openshell.gateway, &matches);
+
+                assert_eq!(
+                    args.service_hostname_format,
+                    Some(ServiceHostnameFormat::Hashed)
+                );
+            });
+    }
+
+    #[test]
+    fn service_hostname_format_cli_and_env_override_file_value() {
+        // CLI flag wins over the file value.
+        let (mut args, matches) = parse_with_args(&[
+            "openshell-gateway",
+            "--db-url",
+            "sqlite::memory:",
+            "--service-hostname-format",
+            "readable",
+        ]);
+        let file =
+            config_file_from_toml("[openshell.gateway]\nservice_hostname_format = \"hashed\"\n");
+        merge_file_into_args(&mut args, &file.openshell.gateway, &matches);
+        assert_eq!(
+            args.service_hostname_format,
+            Some(ServiceHostnameFormat::Readable),
+            "CLI flag must win over file value"
+        );
+
+        // Env var wins over the file value.
+        Environment::new()
+            .set("OPENSHELL_SERVICE_HOSTNAME_FORMAT", "readable")
+            .run(|| {
+                let (mut args, matches) =
+                    parse_with_args(&["openshell-gateway", "--db-url", "sqlite::memory:"]);
+                let file = config_file_from_toml(
+                    "[openshell.gateway]\nservice_hostname_format = \"hashed\"\n",
+                );
+                merge_file_into_args(&mut args, &file.openshell.gateway, &matches);
+                assert_eq!(
+                    args.service_hostname_format,
+                    Some(ServiceHostnameFormat::Readable),
+                    "env var must win over file value"
+                );
+            });
+    }
+
+    #[test]
+    fn server_config_preparation_applies_and_validates_hashed_hostnames() {
+        let state = tempfile::tempdir().unwrap();
+        let local_tls = tempfile::tempdir().unwrap();
+
+        Environment::new()
+            .set("XDG_STATE_HOME", state.path().to_str().unwrap())
+            .set(
+                "OPENSHELL_LOCAL_TLS_DIR",
+                local_tls.path().to_str().unwrap(),
+            )
+            .remove("OPENSHELL_SERVICE_HOSTNAME_FORMAT")
+            .run(|| {
+                let config_path = state.path().join("gateway.toml");
+                std::fs::write(
+                    &config_path,
+                    "[openshell]\nversion = 2\n\n[openshell.gateway]\nname = \"gateway-west\"\nservice_hostname_format = \"hashed\"\n",
+                )
+                .unwrap();
+
+                let (mut args, matches) = parse_with_args(&[
+                    "openshell-gateway",
+                    "--config",
+                    config_path.to_str().unwrap(),
+                    "--db-url",
+                    "sqlite::memory:",
+                    "--compute-driver",
+                    "local",
+                    "--disable-tls",
+                ]);
+
+                let prepared = super::prepare_server_config(&mut args, &matches)
+                    .expect("server config is prepared");
+                assert_eq!(
+                    prepared.config.service_routing_discriminator(),
+                    Some("gateway-west")
+                );
+
+                let invalid_path = state.path().join("invalid-gateway-name.toml");
+                std::fs::write(
+                    &invalid_path,
+                    "[openshell]\nversion = 2\n\n[openshell.gateway]\nname = \"Gateway West\"\nservice_hostname_format = \"hashed\"\n",
+                )
+                .unwrap();
+                let (mut args, matches) = parse_with_args(&[
+                    "openshell-gateway",
+                    "--config",
+                    invalid_path.to_str().unwrap(),
+                    "--db-url",
+                    "sqlite::memory:",
+                    "--compute-driver",
+                    "local",
+                    "--disable-tls",
+                ]);
+                let error = super::prepare_server_config(&mut args, &matches)
+                    .err()
+                    .expect("invalid installation name must fail preparation");
+                assert!(
+                    error.to_string().contains("hashed service hostnames require"),
+                    "unexpected error: {error}"
                 );
             });
     }

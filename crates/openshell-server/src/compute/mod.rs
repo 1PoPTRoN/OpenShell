@@ -902,6 +902,7 @@ pub struct ComputeRuntime {
     /// Desired assignments of the shared supervisor host, when the gateway
     /// coordinates one for the in-process driver.
     supervisor_host: Option<openshell_supervisor_control::SupervisorHostController>,
+    service_route_index: Arc<OnceLock<Arc<crate::service_routing::ServiceRouteIndex>>>,
 }
 
 impl fmt::Debug for ComputeRuntime {
@@ -1011,6 +1012,7 @@ impl ComputeRuntime {
             ssh_identities: Arc::new(OnceLock::new()),
             supervisor_ocsf_headers: Arc::new(OnceLock::new()),
             supervisor_host: None,
+            service_route_index: Arc::new(OnceLock::new()),
         })
     }
 
@@ -1046,6 +1048,13 @@ impl ComputeRuntime {
 
     /// Collector headers that launch bundles carry to supervisors for OCSF
     /// export.
+    pub(crate) fn configure_service_route_index(
+        &self,
+        index: Arc<crate::service_routing::ServiceRouteIndex>,
+    ) {
+        let _ = self.service_route_index.set(index);
+    }
+
     pub(crate) fn configure_supervisor_ocsf_headers(
         &self,
         headers: Option<openshell_core::jwt::SecretOtlpHeaders>,
@@ -6300,12 +6309,16 @@ impl ComputeRuntime {
             if let Ok(endpoint) = ServiceEndpoint::decode(record.payload.as_slice())
                 && endpoint.sandbox_id == sandbox_id
             {
-                self.store
+                let deleted = self
+                    .store
                     .delete(ServiceEndpoint::object_type(), endpoint.object_id())
                     .await
                     .map_err(|e| {
                         format!("delete service endpoint {}: {e}", endpoint.object_id())
                     })?;
+                if deleted && let Some(index) = self.service_route_index.get() {
+                    index.remove(workspace, &endpoint.sandbox, &endpoint.name);
+                }
             }
         }
 
@@ -8383,6 +8396,7 @@ pub fn new_test_runtime_with_driver(
         ssh_identities: Arc::new(OnceLock::new()),
         supervisor_ocsf_headers: Arc::new(OnceLock::new()),
         supervisor_host: None,
+        service_route_index: Arc::new(OnceLock::new()),
     }
 }
 
@@ -9578,6 +9592,7 @@ mod tests {
             ssh_identities: Arc::new(OnceLock::new()),
             supervisor_ocsf_headers: Arc::new(OnceLock::new()),
             supervisor_host: None,
+            service_route_index: Arc::new(OnceLock::new()),
         }
     }
 

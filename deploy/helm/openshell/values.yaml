@@ -519,6 +519,13 @@ server:
   # -- Enable plaintext HTTP routing for loopback sandbox service URLs on
   # TLS-enabled gateways.
   enableLoopbackServiceHttp: true
+  # -- Hostname format for exposed sandbox services. Empty or "readable"
+  # keeps readable `<workspace>--<sandbox>[--<service>]` hostnames; "hashed"
+  # mints opaque one-label hostnames discriminated by the gateway
+  # installation name (server.name, defaulting to the release name). The
+  # name must be unique among all gateways sharing the service base domain,
+  # and renaming the installation changes every minted hostname.
+  serviceHostnameFormat: ""
   # -- Enable the WebSocket tunnel used by CLI/SDK clients behind an
   # authenticated edge proxy. Leave disabled for direct gateway installs.
   enableWebsocketTunnel: false

@@ -161,6 +161,11 @@ pub struct GatewayFileSection {
     /// Enable plaintext HTTP routing for loopback sandbox service URLs.
     #[serde(default)]
     pub enable_loopback_service_http: Option<bool>,
+    /// Hostname format for exposed sandbox services: `readable` (default) or
+    /// `hashed` (opaque one-label hostnames discriminated by the gateway
+    /// installation name).
+    #[serde(default)]
+    pub service_hostname_format: Option<openshell_core::config::ServiceHostnameFormat>,
     /// Enable the WebSocket tunnel for an authenticated edge proxy.
     #[serde(default)]
     pub enable_websocket_tunnel: Option<bool>,
@@ -1152,6 +1157,32 @@ compute_driver = 42
 
         let serialized = toml::to_string(&file).expect("config serializes");
         assert!(serialized.contains("compute_driver = \"docker\""));
+    }
+
+    #[test]
+    fn service_hostname_format_parses_and_serializes() {
+        let file = toml::from_str::<ConfigFile>(
+            r#"
+[openshell]
+version = 2
+
+[openshell.gateway]
+service_hostname_format = "hashed"
+"#,
+        )
+        .expect("service hostname format parses");
+
+        assert_eq!(
+            file.openshell.gateway.service_hostname_format,
+            Some(openshell_core::config::ServiceHostnameFormat::Hashed)
+        );
+
+        let serialized = toml::to_string(&file).expect("config serializes");
+        assert!(serialized.contains("service_hostname_format = \"hashed\""));
+
+        let unset = toml::from_str::<ConfigFile>("[openshell]\nversion = 2\n")
+            .expect("file without the field parses");
+        assert!(unset.openshell.gateway.service_hostname_format.is_none());
     }
 
     #[test]
