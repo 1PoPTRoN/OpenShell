@@ -135,13 +135,7 @@ fn supervisor_records(engine: &ContainerEngine, sandbox: &str) -> Result<Vec<Val
     let filter = format!("label=openshell.ai/sandbox-name={sandbox}");
     let ps = engine
         .command()
-        .args([
-            "ps",
-            "--filter",
-            &filter,
-            "--format",
-            "{{index .Labels \"openshell.ai/sandbox-id\"}}",
-        ])
+        .args(["ps", "--filter", &filter, "--format", "json"])
         .output()
         .map_err(|e| format!("could not run ps: {e}"))?;
     if !ps.status.success() {
@@ -150,11 +144,13 @@ fn supervisor_records(engine: &ContainerEngine, sandbox: &str) -> Result<Vec<Val
             String::from_utf8_lossy(&ps.stderr)
         ));
     }
-    let ids = String::from_utf8_lossy(&ps.stdout);
-    let id = ids
-        .lines()
-        .map(str::trim)
-        .find(|id| !id.is_empty())
+    // Podman 6 renders `.Labels` in a --format template as a string, so read
+    // the label from the JSON output, where it is an object in every version.
+    let containers: Vec<Value> =
+        serde_json::from_slice(&ps.stdout).map_err(|e| format!("parse ps output: {e}"))?;
+    let id = containers
+        .iter()
+        .find_map(|container| container["Labels"]["openshell.ai/sandbox-id"].as_str())
         .ok_or_else(|| format!("no container matches {filter}"))?;
 
     let dir = tempfile::tempdir().map_err(|e| format!("temp dir: {e}"))?;
@@ -222,8 +218,9 @@ async fn supervisor_jsonl_conforms_to_the_native_schema() {
     // every required class appears.
     let mut records = Vec::new();
     let mut last_error = None;
+    let mut last_exec_error = None;
     for _ in 0..12 {
-        let _ = guard.exec(&["python3", "-c", &traffic]).await;
+        last_exec_error = guard.exec(&["python3", "-c", &traffic]).await.err();
         tokio::time::sleep(Duration::from_secs(5)).await;
         match supervisor_records(&engine, &guard.name) {
             Ok(found) => {
@@ -241,9 +238,11 @@ async fn supervisor_jsonl_conforms_to_the_native_schema() {
     let missing = missing_classes(&records);
     assert!(
         missing.is_empty(),
-        "missing OCSF classes {missing:?} in {} records; last copy error: {}",
+        "missing OCSF classes {missing:?} in {} records; last copy error: {}; \
+         last exec error: {}",
         records.len(),
-        last_error.as_deref().unwrap_or("none")
+        last_error.as_deref().unwrap_or("none"),
+        last_exec_error.as_deref().unwrap_or("none")
     );
     let mut failures = Vec::new();
     for record in &records {
